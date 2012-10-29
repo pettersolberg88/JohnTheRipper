@@ -124,11 +124,33 @@ static void init(struct fmt_main *self)
 	atexit(release_all);
 }
 
-
-
 static int valid(char *ciphertext, struct fmt_main *self)
 {
-	return !strncmp(ciphertext, "$pwsafe$", 8);
+	// format $pwsafe$version*salt*iterations*hash
+	char *p;
+	char *ctcopy = strdup(ciphertext);
+	char *keeptr = ctcopy;
+	if (strncmp(ciphertext, "$pwsafe$", 8) != 0)
+		return 0;
+	ctcopy += 9;		/* skip over "$pwsafe$*" */
+	if ((p = strtok(ctcopy, "*")) == NULL)	/* version */
+		return 0;
+	if (atoi(p) == 0)
+		return 0;
+	if ((p = strtok(NULL, "*")) == NULL)	/* salt */
+		return 0;
+	if (strlen(p) < 64)
+		return 0;
+	if ((p = strtok(NULL, "*")) == NULL)	/* iterations */
+		return 0;
+	if (atoi(p) == 0)
+		return 0;
+	if ((p = strtok(NULL, "*")) == NULL)	/* hash */
+		return 0;
+	if (strlen(p) != 64)
+		return 0;
+	MEM_FREE(keeptr);
+	return 1;
 }
 
 static void *get_salt(char *ciphertext)
@@ -182,7 +204,7 @@ static void crypt_all(int count)
 	///Run kernel
 	HANDLE_CLERROR(clEnqueueNDRangeKernel
 	    (queue[ocl_gpu_id], crypt_kernel, 1, NULL, &worksize, &localworksize,
-		0, NULL, &profilingEvent), "Set ND range");
+		0, NULL, profilingEvent), "Set ND range");
 	HANDLE_CLERROR(clEnqueueReadBuffer(queue[ocl_gpu_id], mem_out, CL_FALSE, 0,
 		outsize, host_hash, 0, NULL, NULL),
 	    "Copy data back");

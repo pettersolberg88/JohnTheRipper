@@ -392,7 +392,7 @@ static void crypt_all(int count)
 	HANDLE_CLERROR(code, "failed in clEnqueueWriteBuffer saved_plain");
 
 	code = clEnqueueNDRangeKernel(queue[ocl_gpu_id], crypt_kernel, 1, NULL,
-	    &global_work_size, &local_work_size, 0, NULL, &profilingEvent);
+	    &global_work_size, &local_work_size, 0, NULL, profilingEvent);
 	HANDLE_CLERROR(code, "failed in clEnqueueNDRangeKernel");
 
 	HANDLE_CLERROR(clFinish(queue[ocl_gpu_id]), "clFinish error");
