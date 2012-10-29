@@ -153,6 +153,7 @@ extern struct fmt_main fmt_opencl_DES;
 extern struct fmt_main fmt_opencl_office2007;
 extern struct fmt_main fmt_opencl_office2010;
 extern struct fmt_main fmt_opencl_office2013;
+extern struct fmt_main fmt_opencl_NTLMv2;
 #endif
 #ifdef HAVE_CUDA
 extern struct fmt_main fmt_cuda_cryptmd5;
@@ -309,6 +310,7 @@ static void john_register_all(void)
 	john_register_one(&fmt_opencl_office2007);
 	john_register_one(&fmt_opencl_office2010);
 	john_register_one(&fmt_opencl_office2013);
+	john_register_one(&fmt_opencl_NTLMv2);
 #endif
 
 #ifdef HAVE_CUDA
@@ -672,7 +674,7 @@ static void john_init(char *name, int argc, char **argv)
 		puts("--log-stderr              log to screen instead of file\n");
 		puts("--raw-always-valid=C      if C is 'Y' or 'y', then the dynamic format will");
 		puts("                          always treat raw hashes as valid.");
-		puts("--status-every=N          emit a status line every N seconds\n");
+		puts("--progress-every=N        emit a status line every N seconds\n");
 		exit(0);
 	}
 
@@ -1391,7 +1393,7 @@ int main(int argc, char **argv)
 #endif
 	john_init(name, argc, argv);
 
-	/* --max-run-time and --status-every disregards load time */
+	/* --max-run-time and --progress-every disregards load time */
 	timer_abort = options.max_run_time + 1;
 	timer_status = options.status_interval;
 

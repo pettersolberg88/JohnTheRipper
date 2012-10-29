@@ -40,7 +40,7 @@ cl_program program[MAXGPUS];
 cl_command_queue queue[MAXGPUS];
 cl_int ret_code;
 cl_kernel crypt_kernel;
-cl_event profilingEvent;
+cl_event *profilingEvent, *firstEvent, *lastEvent;
 size_t local_work_size;
 size_t global_work_size;
 size_t max_group_size;
@@ -53,6 +53,8 @@ cl_int oclGetDevCap(cl_device_id device, cl_int *iComputeCapMajor, cl_int *iComp
 void opencl_init_dev(unsigned int dev_id, unsigned int platform_id);
 void opencl_init(char *kernel_filename, unsigned int dev_id,
                  unsigned int platform_id);
+void opencl_init_opt(char *kernel_filename, unsigned int dev_id,
+                     unsigned int platform_id, char *options);
 void opencl_init_from_binary(char *kernel_filename, unsigned int dev_id,
                  unsigned int platform_id);
 void opencl_build_kernel(char *kernel_filename, unsigned int dev_id);
@@ -61,6 +63,7 @@ void opencl_find_best_workgroup_limit(struct fmt_main *self, size_t group_size_l
 
 cl_device_type get_device_type(int dev_id);
 cl_ulong get_local_memory_size(int dev_id);
+cl_ulong get_global_memory_size(int dev_id);
 size_t get_max_work_group_size(int dev_id);
 cl_ulong get_max_mem_alloc_size(int dev_id);
 size_t get_current_work_group_size(int dev_id, cl_kernel crypt_kernel);

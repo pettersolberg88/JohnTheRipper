@@ -29,10 +29,9 @@
 #include "common-opencl.h"
 #include "config.h"
 
-/* These must match kernel's defines */
 #define PLAINTEXT_LENGTH	47
 #define UNICODE_LENGTH		96 /* In octets, including 0x80 */
-#define HASH_LOOPS		128 /* Lower figure gives less X hogging */
+#define HASH_LOOPS		64 /* Lower figure gives less X hogging */
 
 #define FORMAT_LABEL		"office2013-opencl"
 #define FORMAT_NAME		"Office 2013 SHA-512 AES"
@@ -47,6 +46,9 @@
 
 #define LWS_CONFIG		"office2013_LWS"
 #define GWS_CONFIG		"office2013_GWS"
+
+#define MIN(a, b)		(a > b) ? (b) : (a)
+#define MAX(a, b)		(a > b) ? (a) : (b)
 
 static struct fmt_tests tests[] = {
 	/* 2013-openwall.pptx */
@@ -73,7 +75,7 @@ static struct custom_salt {
 } *cur_salt;
 
 static int *cracked;
-static int VF = 1;	/* Will be 4 if vectorized (only on CPU to to GPR pressure) */
+static int VF = 1;	/* Will be 4 if vectorized (only on CPU due to GPR pressure) */
 
 static char *saved_key;	/* Password encoded in UCS-2 */
 static int *saved_len;	/* UCS-2 password length, in octets */
@@ -82,7 +84,7 @@ static unsigned char *key;	/* Output key from kernel */
 static int new_keys, *spincount;
 
 static cl_mem cl_saved_key, cl_saved_len, cl_salt, cl_pwhash, cl_key, cl_spincount;
-static cl_kernel GenerateSHA512pwhash, HashLoop, Generate2013key;
+static cl_kernel GenerateSHA512pwhash, Generate2013key;
 
 static void create_clobj(int gws, struct fmt_main *self)
 {
@@ -131,7 +133,7 @@ static void create_clobj(int gws, struct fmt_main *self)
 	HANDLE_CLERROR(clSetKernelArg(GenerateSHA512pwhash, 2, sizeof(cl_mem), (void*)&cl_salt), "Error setting argument 2");
 	HANDLE_CLERROR(clSetKernelArg(GenerateSHA512pwhash, 3, sizeof(cl_mem), (void*)&cl_pwhash), "Error setting argument 3");
 
-	HANDLE_CLERROR(clSetKernelArg(HashLoop, 0, sizeof(cl_mem), (void*)&cl_pwhash), "Error setting argument 0");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 0, sizeof(cl_mem), (void*)&cl_pwhash), "Error setting argument 0");
 
 	HANDLE_CLERROR(clSetKernelArg(Generate2013key, 0, sizeof(cl_mem), (void*)&cl_pwhash), "Error setting argument 0");
 	HANDLE_CLERROR(clSetKernelArg(Generate2013key, 1, sizeof(cl_mem), (void*)&cl_key), "Error setting argument 1");
@@ -216,11 +218,11 @@ static void set_salt(void *salt)
 	HANDLE_CLERROR(clEnqueueWriteBuffer(queue[ocl_gpu_id], cl_spincount, CL_FALSE, 0, 4, spincount, 0, NULL, NULL), "failed in clEnqueueWriteBuffer spincount");
 }
 
-static cl_ulong gws_test(int gws, struct fmt_main *self)
+static cl_ulong gws_test(int gws, int do_benchmark, struct fmt_main *self)
 {
 	cl_ulong startTime, endTime;
 	cl_command_queue queue_prof;
-	cl_event FirstEvent, LastEvent;
+	cl_event Event[6];
 	cl_int ret_code;
 	int i;
 	size_t scalar_gws = VF * gws;
@@ -231,10 +233,10 @@ static cl_ulong gws_test(int gws, struct fmt_main *self)
 		set_key(tests[0].plaintext, i);
 	set_salt(get_salt(tests[0].ciphertext));
 
-	HANDLE_CLERROR(clEnqueueWriteBuffer(queue_prof, cl_saved_key, CL_TRUE, 0, UNICODE_LENGTH * scalar_gws, saved_key, 0, NULL, &FirstEvent), "Failed transferring keys");
-	HANDLE_CLERROR(clEnqueueWriteBuffer(queue_prof, cl_saved_len, CL_TRUE, 0, sizeof(int) * scalar_gws, saved_len, 0, NULL, NULL), "Failed transferring lengths");
+	HANDLE_CLERROR(clEnqueueWriteBuffer(queue_prof, cl_saved_key, CL_TRUE, 0, UNICODE_LENGTH * scalar_gws, saved_key, 0, NULL, &Event[0]), "Failed transferring keys");
+	HANDLE_CLERROR(clEnqueueWriteBuffer(queue_prof, cl_saved_len, CL_TRUE, 0, sizeof(int) * scalar_gws, saved_len, 0, NULL, &Event[1]), "Failed transferring lengths");
 
-	ret_code = clEnqueueNDRangeKernel(queue_prof, GenerateSHA512pwhash, 1, NULL, &scalar_gws, &local_work_size, 0, NULL, NULL);
+	ret_code = clEnqueueNDRangeKernel(queue_prof, GenerateSHA512pwhash, 1, NULL, &scalar_gws, &local_work_size, 0, NULL, &Event[2]);
 	if (ret_code != CL_SUCCESS) {
 		fprintf(stderr, "Error: %s\n", get_error_name(ret_code));
 		clReleaseCommandQueue(queue_prof);
@@ -242,8 +244,8 @@ static cl_ulong gws_test(int gws, struct fmt_main *self)
 		return 0;
 	}
 
-	for (i = 0; i < *spincount / HASH_LOOPS; i++) {
-		ret_code = clEnqueueNDRangeKernel(queue_prof, HashLoop, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL);
+	for (i = 0; i < *spincount / HASH_LOOPS - 1; i++) {
+		ret_code = clEnqueueNDRangeKernel(queue_prof, crypt_kernel, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL);
 		if (ret_code != CL_SUCCESS) {
 			fprintf(stderr, "Error: %s\n", get_error_name(ret_code));
 			clReleaseCommandQueue(queue_prof);
@@ -251,8 +253,9 @@ static cl_ulong gws_test(int gws, struct fmt_main *self)
 			return 0;
 		}
 	}
+	ret_code = clEnqueueNDRangeKernel(queue_prof, crypt_kernel, 1, NULL, &global_work_size, &local_work_size, 0, NULL, &Event[3]);
 
-	ret_code = clEnqueueNDRangeKernel(queue_prof, Generate2013key, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL);
+	ret_code = clEnqueueNDRangeKernel(queue_prof, Generate2013key, 1, NULL, &global_work_size, &local_work_size, 0, NULL, &Event[4]);
 	if (ret_code != CL_SUCCESS) {
 		fprintf(stderr, "Error: %s\n", get_error_name(ret_code));
 		clReleaseCommandQueue(queue_prof);
@@ -260,12 +263,48 @@ static cl_ulong gws_test(int gws, struct fmt_main *self)
 		return 0;
 	}
 
-	HANDLE_CLERROR(clEnqueueReadBuffer(queue_prof, cl_key, CL_TRUE, 0, 32 * scalar_gws, key, 0, NULL, &LastEvent), "failed in reading key back");
+	HANDLE_CLERROR(clEnqueueReadBuffer(queue_prof, cl_key, CL_TRUE, 0, 128 * scalar_gws, key, 0, NULL, &Event[5]), "failed in reading key back");
 
-	HANDLE_CLERROR(clGetEventProfilingInfo(FirstEvent,
+#if 0
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[2],
+			CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &startTime,
+			NULL), "Failed to get profiling info");
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[2],
+			CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &endTime,
+			NULL), "Failed to get profiling info");
+	fprintf(stderr, "GenerateSHA512pwhash kernel duration: %llu us, ", (endTime-startTime)/1000ULL);
+#endif
+
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[3],
+			CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &startTime,
+			NULL), "Failed to get profiling info");
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[3],
+			CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &endTime,
+			NULL), "Failed to get profiling info");
+	if (do_benchmark)
+		fprintf(stderr, "%.2f ms x %u = %.2f s\t", (float)((endTime - startTime)/1000000.), *spincount/HASH_LOOPS, (float)(*spincount/HASH_LOOPS) * (endTime - startTime) / 1000000000.);
+
+	/* 200 ms duration limit for GCN to avoid ASIC hangs */
+	if (amd_gcn(device_info[ocl_gpu_id]) && endTime - startTime > 200000000) {
+		if (do_benchmark)
+			fprintf(stderr, "- exceeds 200 ms\n");
+		return 0;
+	}
+
+#if 0
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[4],
+			CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &startTime,
+			NULL), "Failed to get profiling info");
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[4],
+			CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &endTime,
+			NULL), "Failed to get profiling info");
+	fprintf(stderr, "Generate2013key kernel duration: %llu us\n", (endTime-startTime)/1000ULL);
+#endif
+
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[0],
 			CL_PROFILING_COMMAND_SUBMIT, sizeof(cl_ulong), &startTime,
 			NULL), "Failed to get profiling info");
-	HANDLE_CLERROR(clGetEventProfilingInfo(LastEvent,
+	HANDLE_CLERROR(clGetEventProfilingInfo(Event[5],
 			CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &endTime,
 			NULL), "Failed to get profiling info");
 	clReleaseCommandQueue(queue_prof);
@@ -289,7 +328,7 @@ static void find_best_gws(int do_benchmark, struct fmt_main *self)
 	}
 
 	for (num = local_work_size; num; num *= 2) {
-		if (!(run_time = gws_test(num, self)))
+		if (!(run_time = gws_test(num, do_benchmark, self)))
 			break;
 
 		sha512perkey = cur_salt->spinCount + 4;
@@ -327,15 +366,17 @@ static void init(struct fmt_main *self)
 {
 	char *temp;
 	cl_ulong maxsize, maxsize2;
+	char build_opts[64];
 
 	global_work_size = 0;
 
-	opencl_init("$JOHN/office2013_kernel.cl", ocl_gpu_id, platform_id);
+	snprintf(build_opts, sizeof(build_opts), "-DHASH_LOOPS=%u -DUNICODE_LENGTH=%u", HASH_LOOPS, UNICODE_LENGTH);
+	opencl_init_opt("$JOHN/office2013_kernel.cl", ocl_gpu_id, platform_id, build_opts);
 
 	// Create kernels to execute
 	GenerateSHA512pwhash = clCreateKernel(program[ocl_gpu_id], "GenerateSHA512pwhash", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
-	crypt_kernel = HashLoop = clCreateKernel(program[ocl_gpu_id], "HashLoop", &ret_code);
+	crypt_kernel = clCreateKernel(program[ocl_gpu_id], "HashLoop", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
 	Generate2013key = clCreateKernel(program[ocl_gpu_id], "Generate2013key", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
@@ -363,29 +404,31 @@ static void init(struct fmt_main *self)
 
 	/* Note: we ask for the kernels' max sizes, not the device's! */
 	HANDLE_CLERROR(clGetKernelWorkGroupInfo(GenerateSHA512pwhash, devices[ocl_gpu_id], CL_KERNEL_WORK_GROUP_SIZE, sizeof(maxsize), &maxsize, NULL), "Query max work group size");
-	HANDLE_CLERROR(clGetKernelWorkGroupInfo(HashLoop, devices[ocl_gpu_id], CL_KERNEL_WORK_GROUP_SIZE, sizeof(maxsize2), &maxsize2, NULL), "Query max work group size");
+	HANDLE_CLERROR(clGetKernelWorkGroupInfo(crypt_kernel, devices[ocl_gpu_id], CL_KERNEL_WORK_GROUP_SIZE, sizeof(maxsize2), &maxsize2, NULL), "Query max work group size");
 	if (maxsize2 < maxsize) maxsize = maxsize2;
 	HANDLE_CLERROR(clGetKernelWorkGroupInfo(Generate2013key, devices[ocl_gpu_id], CL_KERNEL_WORK_GROUP_SIZE, sizeof(maxsize2), &maxsize2, NULL), "Query max work group size");
 	if (maxsize2 < maxsize) maxsize = maxsize2;
 
 	/* maxsize is the lowest figure from the three different kernels */
 	if (!local_work_size) {
-#if 1
-		if (get_device_type(ocl_gpu_id) == CL_DEVICE_TYPE_CPU) {
-			if (get_platform_vendor_id(platform_id) == DEV_INTEL)
-				local_work_size = 8;
-			else
-				local_work_size = 1;
+		if (getenv("LWS")) {
+			/* LWS was explicitly set to 0 */
+			int temp = global_work_size;
+			local_work_size = maxsize;
+			global_work_size = global_work_size ? global_work_size : 4 * maxsize;
+			create_clobj(global_work_size, self);
+			opencl_find_best_workgroup_limit(self, maxsize);
+			release_clobj();
+			global_work_size = temp;
 		} else {
-			local_work_size = 64;
+			if (cpu(device_info[ocl_gpu_id])) {
+				if (get_platform_vendor_id(platform_id) == DEV_INTEL)
+					local_work_size = MIN(maxsize, 8);
+				else
+					local_work_size = 1;
+			} else
+				local_work_size = MIN(maxsize, 64);
 		}
-#else /* This currently can't be used - we'd need more than one "profilingEvent" */
-		int temp = global_work_size;
-		create_clobj(maxsize, self);
-		opencl_find_best_workgroup_limit(self, maxsize);
-		release_clobj();
-		global_work_size = temp;
-#endif
 	}
 
 	if (local_work_size > maxsize) {
@@ -394,7 +437,7 @@ static void init(struct fmt_main *self)
 	}
 
 	if (!global_work_size)
-		find_best_gws(temp == NULL ? 0 : 1, self);
+		find_best_gws(getenv("GWS") == NULL ? 0 : 1, self);
 
 	if (global_work_size < local_work_size)
 		global_work_size = local_work_size;
@@ -404,7 +447,7 @@ static void init(struct fmt_main *self)
 	atexit(release_clobj);
 
 	if (options.utf8)
-		self->params.plaintext_length = 3 * PLAINTEXT_LENGTH > 125 ? 125 : 3 * PLAINTEXT_LENGTH;
+		self->params.plaintext_length = MIN(125, 3 * PLAINTEXT_LENGTH);
 }
 
 static int valid(char *ciphertext, struct fmt_main *self)
@@ -443,12 +486,12 @@ static void crypt_all(int count)
 		new_keys = 0;
 	}
 
-	HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], GenerateSHA512pwhash, 1, NULL, &scalar_gws, &local_work_size, 0, NULL, NULL), "failed in clEnqueueNDRangeKernel");
+	HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], GenerateSHA512pwhash, 1, NULL, &scalar_gws, &local_work_size, 0, NULL, firstEvent), "failed in clEnqueueNDRangeKernel");
 
 	for (index = 0; index < *spincount / HASH_LOOPS; index++)
-		HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], HashLoop, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL), "failed in clEnqueueNDRangeKernel");
+		HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], crypt_kernel, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL), "failed in clEnqueueNDRangeKernel");
 
-	HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], Generate2013key, 1, NULL, &global_work_size, &local_work_size, 0, NULL, NULL), "failed in clEnqueueNDRangeKernel");
+	HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], Generate2013key, 1, NULL, &global_work_size, &local_work_size, 0, NULL, lastEvent), "failed in clEnqueueNDRangeKernel");
 
 	// read back verifier keys
 	HANDLE_CLERROR(clEnqueueReadBuffer(queue[ocl_gpu_id], cl_key, CL_TRUE, 0, 128 * VF * global_work_size, key, 0, NULL, NULL), "failed in reading key back");
@@ -515,7 +558,7 @@ struct fmt_main fmt_opencl_office2013 = {
 #endif
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
-		FMT_CASE | FMT_8_BIT | FMT_UNICODE | FMT_UTF8,
+		FMT_CASE | FMT_8_BIT | FMT_UNICODE | FMT_UTF8 | FMT_OMP,
 		tests
 	}, {
 		init,

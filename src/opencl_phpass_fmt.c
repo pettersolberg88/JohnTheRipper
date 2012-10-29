@@ -279,7 +279,7 @@ static void crypt_all(int count)
 	/// Run kernel
 	HANDLE_CLERROR(clEnqueueNDRangeKernel(queue[ocl_gpu_id], crypt_kernel, 1,
 		NULL, &global_work_size, &local_work_size, 0, NULL,
-		&profilingEvent), "Run kernel");
+		profilingEvent), "Run kernel");
 	HANDLE_CLERROR(clFinish(queue[ocl_gpu_id]), "clFinish");
 
 	/// Read the result back
